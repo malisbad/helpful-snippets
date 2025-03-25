@@ -1,0 +1,66 @@
+#!/bin/bash
+# filepath: /Users/matt/development/scripts/search_iam_principal.sh
+
+# Exit on error
+set -e
+
+# Check if required arguments are provided
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 <principal-email> [output-file]"
+    echo "Example: $0 user@example.com results.txt"
+    exit 1
+fi
+
+PRINCIPAL="$1"
+OUTPUT_FILE="${2:-iam_results_$(date +%Y%m%d_%H%M%S).txt}"
+
+echo "Searching for principal: $PRINCIPAL in organization: $ORG_ID"
+echo "Results will be saved to: $OUTPUT_FILE"
+
+# Clear output file
+> "$OUTPUT_FILE"
+
+# Get the organization ID
+ORG_ID=$(gcloud organizations list --format="value(ID)")
+
+# Get all projects in the organization
+echo "Fetching projects in organization $ORG_ID..."
+# filter out system projects
+PROJECTS=$(gcloud projects list --filter="NOT sys-" --format="value(projectId)")
+
+if [ -z "$PROJECTS" ]; then
+    echo "No projects found in organization $ORG_ID"
+    exit 1
+fi
+
+# Loop through each project
+PROJECT_COUNT=$(echo "$PROJECTS" | wc -l | tr -d '[:space:]')
+echo "Found $PROJECT_COUNT projects. Beginning search..."
+
+counter=0
+for PROJECT_ID in $PROJECTS; do
+    ((counter++))
+    echo "[$counter/$PROJECT_COUNT] Checking project: $PROJECT_ID"
+    
+    # Get IAM policy for the project
+    POLICY=$(gcloud projects get-iam-policy "$PROJECT_ID" --format=json 2>/dev/null || echo "")
+    
+    if [ -z "$POLICY" ]; then
+        echo "  Unable to get IAM policy for project $PROJECT_ID" | tee -a "$OUTPUT_FILE"
+        continue
+    fi
+    
+    # Search for the principal in the policy
+    FOUND=$(echo "$POLICY" | grep -i "$PRINCIPAL" || true)
+    
+    if [ -n "$FOUND" ]; then
+        echo "  ✓ Found principal in project: $PROJECT_ID" | tee -a "$OUTPUT_FILE"
+        
+        # Extract and display roles for this principal
+        echo "  Roles:" | tee -a "$OUTPUT_FILE"
+        echo "$POLICY" | jq --arg principal "$PRINCIPAL" '.bindings[] | select(.members[] | contains($principal)) | {role: .role, principal: $principal}' | tee -a "$OUTPUT_FILE"
+        echo "" | tee -a "$OUTPUT_FILE"
+    fi
+done
+
+echo "Search complete. Results saved to $OUTPUT_FILE"
